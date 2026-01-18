@@ -3,27 +3,31 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 from dotenv import load_dotenv
 
-# 1. WINDOWS STABILITY FIX
+# 1. WINDOWS STABILITY FIX (Prevents the 'GetQueuedCompletionStatus' error)
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
+# 2. SETUP
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 BASE_URL = "https://api.mail.tm"
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# --- MAIL API FUNCTIONS ---
+# --- MAIL.TM API FUNCTIONS ---
 def fetch_messages(token):
     try:
         headers = {"Authorization": f"Bearer {token}"}
         res = requests.get(f"{BASE_URL}/messages", headers=headers)
         return res.json().get('hydra:member', [])
-    except: return []
+    except Exception as e:
+        logging.error(f"Fetch Error: {e}")
+        return []
 
-# --- TIMER: DYNAMIC COUNTDOWN ---
+# --- TIMER: CONTINUOUS COUNTDOWN ---
 async def update_timer(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
+    # job.data = {'message_id', 'time_left', 'email', 'chat_id'}
     job.data['time_left'] -= 1
     
     if job.data['time_left'] <= 0:
@@ -31,12 +35,12 @@ async def update_timer(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.edit_message_text(
                 chat_id=job.chat_id,
                 message_id=job.data['message_id'],
-                text="⚠️ **Session Expired!**\nThis inbox has been deleted. Click /start to get a new one."
+                text=f"❌ **Session Expired!**\nThe inbox for `{job.data['email']}` is now deleted."
             )
         except: pass
         return job.schedule_removal()
 
-    # Update message text with remaining time
+    # Update the countdown message every minute
     keyboard = [[InlineKeyboardButton("📬 Check Inbox", callback_data='check_mail')]]
     try:
         await context.bot.edit_message_text(
@@ -50,12 +54,17 @@ async def update_timer(context: ContextTypes.DEFAULT_TYPE):
 
 # --- BOT COMMANDS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # DIRECT SHARE LINK (No more Inline Mode confusion)
+    bot_url = "https://t.me/ghost_inboxbot"
+    share_text = "Get free temp mail with GhostInbox! 👻"
+    direct_share_link = f"https://t.me/share/url?url={bot_url}&text={share_text}"
+
     keyboard = [
         [InlineKeyboardButton("📧 Generate Email", callback_data='new_mail')],
-        [InlineKeyboardButton("🚀 Share with Friends", switch_inline_query="Get free temp mail here! 👻")]
+        [InlineKeyboardButton("🚀 Share with Friends", url=direct_share_link)]
     ]
     await update.message.reply_text(
-        "👋 **Welcome to GhostInbox**\n\nI provide temporary emails valid for **10 minutes**.",
+        "👋 **Welcome to GhostInbox**\n\nI provide temporary emails valid for **10 minutes**.\nClick below to get started!",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
@@ -68,7 +77,7 @@ async def generate_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await msg.reply_text("⏳ Securing your temporary inbox...")
     
     try:
-        # API Logic
+        # API Logic to create account
         res_dom = requests.get(f"{BASE_URL}/domains").json()
         domain = res_dom['hydra:member'][0]['domain']
         email = f"{uuid.uuid4().hex[:8]}@{domain}"
@@ -80,7 +89,7 @@ async def generate_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if 'token' in token_res:
             context.user_data['token'] = token_res['token']
             
-            # Start Countdown Timer
+            # Start the 10-minute Repeating Job
             context.job_queue.run_repeating(
                 update_timer, interval=60, first=60,
                 chat_id=msg.chat_id,
@@ -94,7 +103,8 @@ async def generate_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown'
             )
     except Exception as e:
-        await status_msg.edit_text("❌ API Error. Try again in a moment.")
+        logging.error(e)
+        await status_msg.edit_text("❌ Server busy. Please try /start again.")
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -102,20 +112,25 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if data == "new_mail":
         await generate_email(update, context)
+        
     elif data == "check_mail":
         token = context.user_data.get('token')
         if not token:
-            await query.message.reply_text("❌ Session expired. Start again.")
+            await query.answer("❌ Session expired!", show_alert=True)
             return
-        
+
+        await query.answer("Checking inbox...")
         messages = fetch_messages(token)
+        
         if not messages:
-            await query.answer("Empty inbox.", show_alert=False)
-            await query.message.reply_text("📭 No messages yet.")
+            await query.message.reply_text("📭 Inbox is empty. (Wait 10s and try again)")
         else:
             text = "📬 **Recent Messages:**\n\n"
             for m in messages[:3]:
-                text += f"From: {m['from']['address']}\nSub: {m['subject']}\n---\n"
+                # Extracting details from Mail.tm format
+                sender = m['from']['address']
+                subject = m['subject']
+                text += f"👤 **From:** {sender}\n📝 **Sub:** {subject}\n---\n"
             await query.message.reply_text(text, parse_mode='Markdown')
 
 # --- EXECUTION ---
@@ -123,7 +138,8 @@ if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("new", generate_email))
     app.add_handler(CallbackQueryHandler(handle_callback))
     
-    print("🚀 GhostInbox is Online!")
+    print("🚀 GhostInbox is Online and syncing...")
     app.run_polling()
