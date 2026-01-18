@@ -64,20 +64,25 @@ async def is_subscribed(user_id, context):
 
 # --- BOT COMMANDS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if not await is_subscribed(user_id, context):
-        keyboard = [[InlineKeyboardButton("📢 Join Channel", url=CHANNEL_LINK)],
-                    [InlineKeyboardButton("✅ I have Joined", callback_data="check_sub")]]
-        await update.message.reply_text(
-            "🛑 **Access Denied!**\n\nPlease join our channel to use this bot for free.",
-            reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown'
-        )
-        return
-
-    keyboard = [[InlineKeyboardButton("📧 Generate Email", callback_data='new_mail')]]
+    # This is the keyboard the user sees when they first start the bot
+    keyboard = [
+        [InlineKeyboardButton("📧 Generate Email", callback_data='gen_mail')],
+        [
+            # This button opens the user's contact list and prepares a message
+            InlineKeyboardButton(
+                "🚀 Share with Friends", 
+                switch_inline_query="Check out this cool Temp Mail bot for students! 👻"
+            )
+        ]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
     await update.message.reply_text(
-        "👻 **GhostInbox** is ready!\nClick below to get a secure temp email.",
-        reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown'
+        "👋 **Welcome to GhostInbox**\n\nProtect your privacy with instant temporary emails. "
+        "I'll notify you automatically when you receive a message!",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
     )
 
 async def generate_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
