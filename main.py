@@ -3,7 +3,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 from dotenv import load_dotenv
 
-# 1. WINDOWS STABILITY FIX (Prevents the 'GetQueuedCompletionStatus' error)
+# 1. WINDOWS STABILITY FIX
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
@@ -24,10 +24,29 @@ def fetch_messages(token):
         logging.error(f"Fetch Error: {e}")
         return []
 
+def get_message_content(message_id, token):
+    try:
+        headers = {"Authorization": f"Bearer {token}"}
+        res = requests.get(f"{BASE_URL}/messages/{message_id}", headers=headers)
+        data = res.json()
+        return data.get('text', data.get('intro', "No content available."))
+    except Exception as e:
+        logging.error(f"Read Error: {e}")
+        return "❌ Error retrieving message content."
+
+def delete_mail(message_id, token):
+    """Deletes a specific message from the server."""
+    try:
+        headers = {"Authorization": f"Bearer {token}"}
+        res = requests.delete(f"{BASE_URL}/messages/{message_id}", headers=headers)
+        return res.status_code == 204
+    except Exception as e:
+        logging.error(f"Delete Error: {e}")
+        return False
+
 # --- TIMER: CONTINUOUS COUNTDOWN ---
 async def update_timer(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
-    # job.data = {'message_id', 'time_left', 'email', 'chat_id'}
     job.data['time_left'] -= 1
     
     if job.data['time_left'] <= 0:
@@ -40,7 +59,6 @@ async def update_timer(context: ContextTypes.DEFAULT_TYPE):
         except: pass
         return job.schedule_removal()
 
-    # Update the countdown message every minute
     keyboard = [[InlineKeyboardButton("📬 Check Inbox", callback_data='check_mail')]]
     try:
         await context.bot.edit_message_text(
@@ -54,7 +72,6 @@ async def update_timer(context: ContextTypes.DEFAULT_TYPE):
 
 # --- BOT COMMANDS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # DIRECT SHARE LINK (No more Inline Mode confusion)
     bot_url = "https://t.me/ghost_inboxbot"
     share_text = "Get free temp mail with GhostInbox! 👻"
     direct_share_link = f"https://t.me/share/url?url={bot_url}&text={share_text}"
@@ -64,7 +81,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🚀 Share with Friends", url=direct_share_link)]
     ]
     await update.message.reply_text(
-        "👋 **Welcome to GhostInbox**\n\nI provide temporary emails valid for **10 minutes**.\nClick below to get started!",
+        "👋 **Welcome to GhostInbox**\n\nI provide temporary emails valid for **10 minutes**.",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
@@ -77,7 +94,6 @@ async def generate_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await msg.reply_text("⏳ Securing your temporary inbox...")
     
     try:
-        # API Logic to create account
         res_dom = requests.get(f"{BASE_URL}/domains").json()
         domain = res_dom['hydra:member'][0]['domain']
         email = f"{uuid.uuid4().hex[:8]}@{domain}"
@@ -88,8 +104,6 @@ async def generate_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if 'token' in token_res:
             context.user_data['token'] = token_res['token']
-            
-            # Start the 10-minute Repeating Job
             context.job_queue.run_repeating(
                 update_timer, interval=60, first=60,
                 chat_id=msg.chat_id,
@@ -102,19 +116,18 @@ async def generate_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 parse_mode='Markdown'
             )
-    except Exception as e:
-        logging.error(e)
-        await status_msg.edit_text("❌ Server busy. Please try /start again.")
+    except Exception:
+        await status_msg.edit_text("❌ Server busy. Try /start again.")
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
+    token = context.user_data.get('token')
     
     if data == "new_mail":
         await generate_email(update, context)
         
     elif data == "check_mail":
-        token = context.user_data.get('token')
         if not token:
             await query.answer("❌ Session expired!", show_alert=True)
             return
@@ -123,23 +136,54 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         messages = fetch_messages(token)
         
         if not messages:
-            await query.message.reply_text("📭 Inbox is empty. (Wait 10s and try again)")
+            await query.message.reply_text("📭 Inbox is empty.")
         else:
-            text = "📬 **Recent Messages:**\n\n"
             for m in messages[:3]:
-                # Extracting details from Mail.tm format
                 sender = m['from']['address']
                 subject = m['subject']
-                text += f"👤 **From:** {sender}\n📝 **Sub:** {subject}\n---\n"
-            await query.message.reply_text(text, parse_mode='Markdown')
+                msg_id = m['id']
+                
+                keyboard = [
+                    [InlineKeyboardButton("📖 Read", callback_data=f"read_{msg_id}"),
+                     InlineKeyboardButton("🗑️ Delete", callback_data=f"del_{msg_id}")]
+                ]
+                
+                await query.message.reply_text(
+                    f"👤 **From:** {sender}\n📝 **Sub:** {subject}",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode='Markdown'
+                )
+
+    elif data.startswith("read_"):
+        await query.answer("Fetching content...")
+        msg_id = data.split("_")[1]
+        content = get_message_content(msg_id, token)
+        
+        # Add a delete button at the bottom of the email too
+        keyboard = [[InlineKeyboardButton("🗑️ Delete this Email", callback_data=f"del_{msg_id}")]]
+        
+        await query.message.reply_text(
+            f"📧 **Full Message Content:**\n\n{content}",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+
+    elif data.startswith("del_"):
+        msg_id = data.split("_")[1]
+        success = delete_mail(msg_id, token)
+        
+        if success:
+            await query.message.delete()
+            await query.answer("✅ Message deleted.", show_alert=False)
+        else:
+            await query.answer("❌ Failed to delete.", show_alert=True)
 
 # --- EXECUTION ---
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).build()
-    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("new", generate_email))
     app.add_handler(CallbackQueryHandler(handle_callback))
     
-    print("🚀 GhostInbox is Online and syncing...")
+    print("🚀 GhostInbox Online with Read/Delete features!")
     app.run_polling()
